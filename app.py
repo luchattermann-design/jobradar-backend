@@ -4,116 +4,165 @@ import threading
 import time
 import os
 
-from greenhouse  import fetch_greenhouse_jobs
-from lever       import fetch_lever_jobs
-from ashby       import fetch_ashby_jobs
-from remoteok    import fetch_remoteok_jobs
-from yc          import fetch_yc_jobs
-from wttj        import fetch_wttj_jobs
-from himalayas   import fetch_himalayas_jobs
-from wwr         import fetch_wwr_jobs
-from hn          import fetch_hn_jobs
-from scorer      import score_job
+from greenhouse import fetch_greenhouse_jobs
+from lever import fetch_lever_jobs
+from ashby import fetch_ashby_jobs
+from remoteok import fetch_remoteok_jobs
+from yc import fetch_yc_jobs
+from wttj import fetch_wttj_jobs
+from himalayas import fetch_himalayas_jobs
+from wwr import fetch_wwr_jobs
+from hn import fetch_hn_jobs
+from scorer import score_job
 
 app = Flask(__name__)
-CORS(app)
+
+CORS(
+    app,
+    resources={r"/*": {"origins": "https://luchattermann-design.github.io"}},
+    methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
+)
 
 scan_state = {
-    "running":  False,
+    "running": False,
     "progress": 0,
-    "status":   "En attente",
-    "jobs":     [],
+    "status": "En attente",
+    "jobs": [],
 }
+
 
 def run_scan(min_score=35, max_jobs=25):
     global scan_state
-    scan_state.update({"running": True, "progress": 0, "jobs": []})
+    scan_state.update({
+        "running": True,
+        "progress": 0,
+        "status": "Initialisation du scan…",
+        "jobs": [],
+    })
 
     steps = [
-        ("Connexion aux sources…",      None),
-        ("Scan Greenhouse…",            fetch_greenhouse_jobs),
-        ("Scan Lever…",                 fetch_lever_jobs),
-        ("Scan Ashby…",                 fetch_ashby_jobs),
-        ("Scan RemoteOK…",              fetch_remoteok_jobs),
-        ("Scan YCombinator…",           fetch_yc_jobs),
+        ("Connexion aux sources…", None),
+        ("Scan Greenhouse…", fetch_greenhouse_jobs),
+        ("Scan Lever…", fetch_lever_jobs),
+        ("Scan Ashby…", fetch_ashby_jobs),
+        ("Scan RemoteOK…", fetch_remoteok_jobs),
+        ("Scan YCombinator…", fetch_yc_jobs),
         ("Scan Welcome to the Jungle…", fetch_wttj_jobs),
-        ("Scan Himalayas…",             fetch_himalayas_jobs),
-        ("Scan We Work Remotely…",      fetch_wwr_jobs),
-        ("Scan Hacker News Hiring…",    fetch_hn_jobs),
-        ("Calcul des scores…",          None),
-        ("Filtrage et tri…",            None),
+        ("Scan Himalayas…", fetch_himalayas_jobs),
+        ("Scan We Work Remotely…", fetch_wwr_jobs),
+        ("Scan Hacker News Hiring…", fetch_hn_jobs),
+        ("Calcul des scores…", None),
+        ("Filtrage et tri…", None),
     ]
 
     all_jobs = []
     total = len(steps)
 
-    for i, (label, fetcher) in enumerate(steps):
-        scan_state["status"]   = label
-        scan_state["progress"] = int((i / total) * 100)
-        if fetcher:
-            try:
-                jobs = fetcher()
-                all_jobs.extend(jobs)
-            except Exception as e:
-                print(f"Erreur {label}: {e}")
-        time.sleep(0.2)
+    try:
+        for i, (label, fetcher) in enumerate(steps):
+            scan_state["status"] = label
+            scan_state["progress"] = int((i / total) * 100)
 
-    scored = []
-    seen_links = set()
-    for job in sorted(all_jobs, key=lambda j: score_job(j), reverse=True):
-        if len(scored) >= max_jobs:
-            break
-        score = score_job(job)
-        if score < min_score:
-            continue
-        link = job.get("link", "")
-        if not link or link in seen_links:
-            continue
-        seen_links.add(link)
-        scored.append({
-            "company":  job.get("company", ""),
-            "position": job.get("position", ""),
-            "location": job.get("location", ""),
-            "link":     link,
-            "source":   job.get("source", ""),
-            "score":    score,
+            if fetcher:
+                try:
+                    jobs = fetcher()
+                    if jobs:
+                        all_jobs.extend(jobs)
+                except Exception as e:
+                    print(f"Erreur {label}: {e}")
+
+            time.sleep(0.2)
+
+        scored = []
+        seen_links = set()
+
+        for job in sorted(all_jobs, key=lambda j: score_job(j), reverse=True):
+            if len(scored) >= max_jobs:
+                break
+
+            score = score_job(job)
+            if score < min_score:
+                continue
+
+            link = job.get("link", "")
+            if not link or link in seen_links:
+                continue
+
+            seen_links.add(link)
+
+            scored.append({
+                "company": job.get("company", ""),
+                "position": job.get("position", ""),
+                "location": job.get("location", ""),
+                "link": link,
+                "source": job.get("source", ""),
+                "score": score,
+            })
+
+        scan_state.update({
+            "running": False,
+            "progress": 100,
+            "status": f"Terminé — {len(scored)} offres trouvées",
+            "jobs": scored,
         })
 
-    scan_state.update({
-        "running":  False,
-        "progress": 100,
-        "status":   f"Terminé — {len(scored)} offres trouvées",
-        "jobs":     scored,
-    })
+    except Exception as e:
+        print(f"Erreur globale pendant le scan: {e}")
+        scan_state.update({
+            "running": False,
+            "progress": 100,
+            "status": "Erreur pendant le scan",
+            "jobs": [],
+        })
 
 
 @app.route("/")
 def index():
     return jsonify({"status": "JobRadar API running"})
 
+
 @app.route("/health")
 def health():
     return jsonify({"ok": True})
+
 
 @app.route("/scan", methods=["POST"])
 def start_scan():
     if scan_state["running"]:
         return jsonify({"error": "Scan deja en cours"}), 409
-    data      = request.get_json(silent=True) or {}
-    min_score = int(data.get("min_score", 35))
-    max_jobs  = int(data.get("max_jobs",  25))
-    thread = threading.Thread(target=run_scan, args=(min_score, max_jobs), daemon=True)
+
+    data = request.get_json(silent=True) or {}
+
+    try:
+        min_score = int(data.get("min_score", 35))
+    except (ValueError, TypeError):
+        min_score = 35
+
+    try:
+        max_jobs = int(data.get("max_jobs", 25))
+    except (ValueError, TypeError):
+        max_jobs = 25
+
+    thread = threading.Thread(
+        target=run_scan,
+        args=(min_score, max_jobs),
+        daemon=True
+    )
     thread.start()
+
     return jsonify({"message": "Scan demarre"}), 202
+
 
 @app.route("/status")
 def get_status():
     return jsonify({
-        "running":  scan_state["running"],
+        "running": scan_state["running"],
         "progress": scan_state["progress"],
-        "status":   scan_state["status"],
-        "count":    len(scan_state["jobs"]),
+        "status": scan_state["status"],
+        "count": len(scan_state["jobs"]),
     })
+
 
 @app.route("/jobs")
 def get_jobs():
