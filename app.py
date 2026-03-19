@@ -13,7 +13,7 @@ from wttj import fetch_wttj_jobs
 from himalayas import fetch_himalayas_jobs
 from wwr import fetch_wwr_jobs
 from hn import fetch_hn_jobs
-from scorer import score_job
+from scorer import normalize_job, deduplicate_jobs
 
 app = Flask(__name__)
 
@@ -24,97 +24,93 @@ CORS(
     allow_headers=["Content-Type"],
 )
 
+FETCHERS = {
+    "Greenhouse": fetch_greenhouse_jobs,
+    "Lever": fetch_lever_jobs,
+    "Ashby": fetch_ashby_jobs,
+    "RemoteOK": fetch_remoteok_jobs,
+    "YCombinator": fetch_yc_jobs,
+    "Welcome to the Jungle": fetch_wttj_jobs,
+    "Himalayas": fetch_himalayas_jobs,
+    "We Work Remotely": fetch_wwr_jobs,
+    "Hacker News": fetch_hn_jobs,
+}
+
+scan_lock = threading.Lock()
 scan_state = {
     "running": False,
     "progress": 0,
     "status": "En attente",
     "jobs": [],
+    "count": 0,
+    "sources": list(FETCHERS.keys()),
 }
 
 
-def run_scan(min_score=35, max_jobs=25):
-    global scan_state
-    scan_state.update({
-        "running": True,
-        "progress": 0,
-        "status": "Initialisation du scan…",
-        "jobs": [],
-    })
+def update_scan_state(**kwargs):
+    with scan_lock:
+        scan_state.update(kwargs)
 
-    steps = [
-        ("Connexion aux sources…", None),
-        ("Scan Greenhouse…", fetch_greenhouse_jobs),
-        ("Scan Lever…", fetch_lever_jobs),
-        ("Scan Ashby…", fetch_ashby_jobs),
-        ("Scan RemoteOK…", fetch_remoteok_jobs),
-        ("Scan YCombinator…", fetch_yc_jobs),
-        ("Scan Welcome to the Jungle…", fetch_wttj_jobs),
-        ("Scan Himalayas…", fetch_himalayas_jobs),
-        ("Scan We Work Remotely…", fetch_wwr_jobs),
-        ("Scan Hacker News Hiring…", fetch_hn_jobs),
-        ("Calcul des scores…", None),
-        ("Filtrage et tri…", None),
-    ]
+
+def run_scan(selected_sources=None):
+    sources = selected_sources or list(FETCHERS.keys())
+
+    update_scan_state(
+        running=True,
+        progress=0,
+        status="Initialisation du scan...",
+        jobs=[],
+        count=0,
+        sources=sources,
+    )
 
     all_jobs = []
-    total = len(steps)
+    total_steps = max(len(sources) + 2, 1)
 
     try:
-        for i, (label, fetcher) in enumerate(steps):
-            scan_state["status"] = label
-            scan_state["progress"] = int((i / total) * 100)
+        for i, source_name in enumerate(sources):
+            fetcher = FETCHERS.get(source_name)
+            if not fetcher:
+                continue
 
-            if fetcher:
-                try:
-                    jobs = fetcher()
-                    if jobs:
-                        all_jobs.extend(jobs)
-                except Exception as e:
-                    print(f"Erreur {label}: {e}")
+            update_scan_state(
+                status=f"Scan {source_name}...",
+                progress=int((i / total_steps) * 100),
+            )
+
+            try:
+                jobs = fetcher() or []
+                normalized = [normalize_job(job, default_source=source_name) for job in jobs]
+                all_jobs.extend(normalized)
+                update_scan_state(count=len(all_jobs))
+            except Exception as e:
+                print(f"Erreur {source_name}: {e}")
 
             time.sleep(0.2)
 
-        scored = []
-        seen_links = set()
+        update_scan_state(
+            status="Dedoublonnage...",
+            progress=int((len(sources) / total_steps) * 100),
+        )
+        deduped = deduplicate_jobs(all_jobs)
 
-        for job in sorted(all_jobs, key=lambda j: score_job(j), reverse=True):
-            if len(scored) >= max_jobs:
-                break
-
-            score = score_job(job)
-            if score < min_score:
-                continue
-
-            link = job.get("link", "")
-            if not link or link in seen_links:
-                continue
-
-            seen_links.add(link)
-
-            scored.append({
-                "company": job.get("company", ""),
-                "position": job.get("position", ""),
-                "location": job.get("location", ""),
-                "link": link,
-                "source": job.get("source", ""),
-                "score": score,
-            })
-
-        scan_state.update({
-            "running": False,
-            "progress": 100,
-            "status": f"Terminé — {len(scored)} offres trouvées",
-            "jobs": scored,
-        })
+        update_scan_state(
+            running=False,
+            progress=100,
+            status=f"Termine - {len(deduped)} offres collectees",
+            jobs=deduped,
+            count=len(deduped),
+        )
 
     except Exception as e:
         print(f"Erreur globale pendant le scan: {e}")
-        scan_state.update({
-            "running": False,
-            "progress": 100,
-            "status": "Erreur pendant le scan",
-            "jobs": [],
-        })
+        update_scan_state(
+            running=False,
+            progress=100,
+            status="Erreur pendant le scan",
+            jobs=[],
+            count=0,
+        )
 
 
 @app.route("/")
@@ -129,25 +125,17 @@ def health():
 
 @app.route("/scan", methods=["POST"])
 def start_scan():
-    if scan_state["running"]:
-        return jsonify({"error": "Scan deja en cours"}), 409
+    with scan_lock:
+        if scan_state["running"]:
+            return jsonify({"error": "Scan deja en cours"}), 409
 
     data = request.get_json(silent=True) or {}
-
-    try:
-        min_score = int(data.get("min_score", 35))
-    except (ValueError, TypeError):
-        min_score = 35
-
-    try:
-        max_jobs = int(data.get("max_jobs", 25))
-    except (ValueError, TypeError):
-        max_jobs = 25
+    sources = data.get("sources") or list(FETCHERS.keys())
 
     thread = threading.Thread(
         target=run_scan,
-        args=(min_score, max_jobs),
-        daemon=True
+        args=(sources,),
+        daemon=True,
     )
     thread.start()
 
@@ -156,17 +144,20 @@ def start_scan():
 
 @app.route("/status")
 def get_status():
-    return jsonify({
-        "running": scan_state["running"],
-        "progress": scan_state["progress"],
-        "status": scan_state["status"],
-        "count": len(scan_state["jobs"]),
-    })
+    with scan_lock:
+        return jsonify({
+            "running": scan_state["running"],
+            "progress": scan_state["progress"],
+            "status": scan_state["status"],
+            "count": scan_state["count"],
+            "sources": scan_state["sources"],
+        })
 
 
 @app.route("/jobs")
 def get_jobs():
-    return jsonify({"jobs": scan_state["jobs"]})
+    with scan_lock:
+        return jsonify({"jobs": scan_state["jobs"]})
 
 
 if __name__ == "__main__":
