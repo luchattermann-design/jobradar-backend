@@ -685,6 +685,8 @@ def mock_job(
     description: str,
     level: str,
 ) -> dict[str, Any]:
+    # FIX Bug 7: include location in the slug so distinct jobs at different
+    # locations don't collapse onto the same deduplication key.
     slug = slugify(f"{source}-{company}-{position}-{location}")
     source_slug = slugify(source)
     external_search_link = build_external_search_link(
@@ -697,7 +699,9 @@ def mock_job(
         "company": company,
         "position": position,
         "location": location,
-        "link": external_search_link or f"https://example.com/{source_slug}/{slug}",
+        # Append slug as a fragment so same-source jobs with identical search
+        # params are still treated as distinct records during deduplication.
+        "link": (external_search_link or f"https://example.com/{source_slug}/{slug}") + f"#{slug}",
         "source": source,
         "description": description,
         "level": level,
@@ -752,6 +756,8 @@ def build_context(payload: dict[str, Any]) -> ScanContext:
     weights = payload.get("weights", {})
     display = payload.get("display", {})
 
+    # FIX Bug 9: preserve original casing for source names so they match
+    # SOURCE_COMPANIES keys (e.g. "LinkedIn", "Welcome to the Jungle").
     requested_sources = [
         str(item).strip() for item in filters.get("sources", []) if str(item).strip()
     ]
@@ -839,13 +845,13 @@ def job_matches_filters(job: dict[str, Any], filters: dict[str, list[str]]) -> b
     return True
 
 
-def compute_keyword_score(job: dict[str, Any], keywords: list[str]) -> float:
+def compute_keyword_score(job: dict[str, Any], keywords: list[str], expanded: list[str]) -> float:
+    # FIX Bug 8: accept pre-computed expanded keywords to avoid redundant work.
     if not keywords:
         return 0.0
 
     title = normalize_text(job.get("position"))
     description = normalize_text(job.get("description"))
-    expanded = expand_keywords(keywords)
 
     score = 0.0
 
@@ -902,20 +908,20 @@ def compute_company_score(job: dict[str, Any], companies: list[str]) -> float:
     return 0.0
 
 
-def compute_semantic_score(job: dict[str, Any], keywords: list[str]) -> float:
+def compute_semantic_score(job: dict[str, Any], expanded: list[str]) -> float:
+    # FIX Bug 8: accept pre-computed expanded keywords.
     title = normalize_text(job.get("position"))
     description = normalize_text(job.get("description"))
-    reference_terms = expand_keywords(keywords)
 
-    if not reference_terms:
+    if not expanded:
         return 0.0
 
     overlap = 0
-    for term in reference_terms:
+    for term in expanded:
         if term in title or term in description:
             overlap += 1
 
-    denominator = max(8, int(len(reference_terms) * 0.32))
+    denominator = max(8, int(len(expanded) * 0.32))
     return min(100.0, (overlap / denominator) * 100.0)
 
 
@@ -924,24 +930,30 @@ def compute_final_score(
     filters: dict[str, list[str]],
     weights: dict[str, int | float],
 ) -> dict[str, float]:
-    keyword_score = compute_keyword_score(job, filters.get("keywords", []))
+    # FIX Bug 8: expand keywords once and reuse across all score functions.
+    keywords = filters.get("keywords", [])
+    expanded = expand_keywords(keywords)
+
+    keyword_score = compute_keyword_score(job, keywords, expanded)
     location_score = compute_location_score(job, filters.get("locations", []))
     company_score = compute_company_score(job, filters.get("companies", []))
-    semantic_score = compute_semantic_score(job, filters.get("keywords", []))
+    semantic_score = compute_semantic_score(job, expanded)
 
+    # FIX Bug 2: always include active dimensions in the denominator so that
+    # a zero location score actually penalises the final result instead of
+    # being silently dropped.  A dimension is "active" whenever the
+    # corresponding filter is non-empty (i.e. the user cares about it).
     active_parts: list[tuple[float, float]] = []
 
     if filters.get("keywords"):
         active_parts.append((keyword_score, float(weights.get("keywords", 0))))
+        active_parts.append((semantic_score, float(weights.get("semantic", 0))))
 
-    if filters.get("locations") and location_score > 0:
+    if filters.get("locations"):
         active_parts.append((location_score, float(weights.get("location", 0))))
 
-    if filters.get("companies") and company_score > 0:
+    if filters.get("companies"):
         active_parts.append((company_score, float(weights.get("company", 0))))
-
-    if filters.get("keywords") and semantic_score > 0:
-        active_parts.append((semantic_score, float(weights.get("semantic", 0))))
 
     total_weight = sum(weight for _, weight in active_parts)
     weighted_sum = sum(score * weight for score, weight in active_parts)
@@ -1046,10 +1058,21 @@ def index() -> Any:
 
 @app.post("/scan")
 def start_scan() -> Any:
-    if scan_state["running"]:
-        return jsonify({"message": "Un scan est deja en cours"}), 409
+    # FIX Bug 6: acquire the lock for the full check-and-start sequence so
+    # concurrent POST requests cannot both pass the running guard before either
+    # thread sets running=True.
+    with scan_lock:
+        if scan_state["running"]:
+            return jsonify({"message": "Un scan est deja en cours"}), 409
+        # Mark as running immediately inside the lock so no second request
+        # can sneak through before the worker thread calls update_scan_state.
+        scan_state["running"] = True
 
-    payload = request.get_json(silent=True) or deepcopy(DEFAULT_SCAN_PAYLOAD)
+    # FIX Bug 3: always deepcopy the incoming payload so mutations inside
+    # run_scan / build_context never corrupt the caller's dict.
+    raw_payload = request.get_json(silent=True)
+    payload = deepcopy(raw_payload) if raw_payload is not None else deepcopy(DEFAULT_SCAN_PAYLOAD)
+
     worker = Thread(target=run_scan, args=(payload,), daemon=True)
     worker.start()
     return jsonify(
