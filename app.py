@@ -12,6 +12,16 @@ from flask import Flask, jsonify, request, send_from_directory
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 
+BACKEND_VERSION = "jobradar-business-v3"
+
+
+@app.after_request
+def add_cors_headers(response: Any) -> Any:
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return response
+
 
 SOURCE_COMPANIES: dict[str, list[str]] = {
     "Greenhouse": ["HubSpot", "Notion", "Intercom"],
@@ -578,6 +588,7 @@ scan_state: dict[str, Any] = {
     "progress": 0,
     "status": "Idle",
     "count": 0,
+    "sources": AVAILABLE_SOURCES,
     "jobs": [],
     "raw_jobs": [],
     "request": deepcopy(DEFAULT_SCAN_PAYLOAD),
@@ -915,6 +926,7 @@ def run_scan(payload: dict[str, Any]) -> None:
         progress=0,
         status="Initialisation du scan...",
         count=0,
+        sources=active_sources,
         jobs=[],
         raw_jobs=[],
         request=deepcopy(payload),
@@ -976,7 +988,13 @@ def start_scan() -> Any:
     payload = request.get_json(silent=True) or deepcopy(DEFAULT_SCAN_PAYLOAD)
     worker = Thread(target=run_scan, args=(payload,), daemon=True)
     worker.start()
-    return jsonify({"message": "Scan demarre"})
+    return jsonify(
+        {
+            "message": "Scan demarre",
+            "version": BACKEND_VERSION,
+            "sources": payload.get("filters", {}).get("sources", AVAILABLE_SOURCES),
+        }
+    )
 
 
 @app.get("/status")
@@ -984,10 +1002,12 @@ def get_status() -> Any:
     with scan_lock:
         return jsonify(
             {
+                "version": BACKEND_VERSION,
                 "running": scan_state["running"],
                 "progress": scan_state["progress"],
                 "status": scan_state["status"],
                 "count": scan_state["count"],
+                "sources": scan_state["sources"],
             }
         )
 
@@ -1041,6 +1061,7 @@ def health() -> Any:
     return jsonify(
         {
             "ok": True,
+            "version": BACKEND_VERSION,
             "sources": len(AVAILABLE_SOURCES),
             "roles": len(ROLE_LIBRARY),
         }
