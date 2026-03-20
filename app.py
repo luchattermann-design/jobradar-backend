@@ -596,6 +596,18 @@ def slugify(value: str) -> str:
     return slug or "job"
 
 
+def normalize_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip().lower()
+
+
+def normalize_list(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    return [normalize_text(item) for item in values if normalize_text(item)]
+
+
 def mock_job(
     source: str,
     company: str,
@@ -658,18 +670,6 @@ def build_mock_source_data() -> dict[str, list[dict[str, Any]]]:
 
 
 MOCK_SOURCE_DATA = build_mock_source_data()
-
-
-def normalize_text(value: Any) -> str:
-    if value is None:
-        return ""
-    return str(value).strip().lower()
-
-
-def normalize_list(values: Any) -> list[str]:
-    if not isinstance(values, list):
-        return []
-    return [normalize_text(item) for item in values if normalize_text(item)]
 
 
 def build_context(payload: dict[str, Any]) -> ScanContext:
