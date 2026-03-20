@@ -13,7 +13,7 @@ from flask import Flask, jsonify, request, send_from_directory
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 
-BACKEND_VERSION = "jobradar-business-v3"
+BACKEND_VERSION = "jobradar-search-links-v4"
 
 
 @app.after_request
@@ -608,6 +608,35 @@ def slugify(value: str) -> str:
     return slug or "job"
 
 
+SOURCE_SEARCH_HINTS: dict[str, str] = {
+    "Greenhouse": "site:boards.greenhouse.io",
+    "Lever": "site:jobs.lever.co",
+    "Ashby": "site:jobs.ashbyhq.com",
+    "RemoteOK": "site:remoteok.com",
+    "YCombinator": "site:workatastartup.com",
+    "Welcome to the Jungle": "site:welcometothejungle.com",
+    "Himalayas": "site:himalayas.app",
+    "We Work Remotely": "site:weworkremotely.com",
+    "Hacker News": 'site:news.ycombinator.com "Who is hiring"',
+    "Otta": "Otta jobs",
+    "Wellfound": "Wellfound jobs",
+    "Indeed": "Indeed jobs",
+    "Glassdoor": "Glassdoor jobs",
+    "Flexa": "Flexa careers",
+    "EuroTechJobs": "EuroTechJobs",
+    "Built In": "Built In jobs",
+    "JobTeaser": "JobTeaser jobs",
+    "Talent.com": "Talent.com jobs",
+    "StepStone": "StepStone jobs",
+    "Adzuna": "Adzuna jobs",
+    "Reed": "Reed jobs",
+}
+
+
+def build_google_search_link(query: str) -> str:
+    return f"https://www.google.com/search?q={quote_plus(query)}"
+
+
 def build_external_search_link(
     source: str,
     company: str,
@@ -624,7 +653,16 @@ def build_external_search_link(
             return f"{base_url}?keywords={encoded_keywords}&location={encoded_location}"
         return f"{base_url}?keywords={encoded_keywords}"
 
-    return ""
+    if source == "Indeed":
+        base_url = "https://www.indeed.com/jobs"
+        if encoded_location:
+            return f"{base_url}?q={encoded_keywords}&l={encoded_location}"
+        return f"{base_url}?q={encoded_keywords}"
+
+    hint = SOURCE_SEARCH_HINTS.get(source, source)
+    query_parts = [hint, position, company, location]
+    query = " ".join(part for part in query_parts if part)
+    return build_google_search_link(query)
 
 
 def normalize_text(value: Any) -> str:
