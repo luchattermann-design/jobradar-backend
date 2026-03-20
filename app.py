@@ -6,6 +6,7 @@ from threading import Lock, Thread
 from time import sleep
 from typing import Any
 import re
+from urllib.parse import quote_plus
 
 from flask import Flask, jsonify, request, send_from_directory
 
@@ -607,6 +608,25 @@ def slugify(value: str) -> str:
     return slug or "job"
 
 
+def build_external_search_link(
+    source: str,
+    company: str,
+    position: str,
+    location: str,
+) -> str:
+    search_terms = " ".join(part for part in [position, company] if part).strip()
+    encoded_keywords = quote_plus(search_terms or position or company or "jobs")
+    encoded_location = quote_plus(location or "")
+
+    if source == "LinkedIn":
+        base_url = "https://www.linkedin.com/jobs/search/"
+        if encoded_location:
+            return f"{base_url}?keywords={encoded_keywords}&location={encoded_location}"
+        return f"{base_url}?keywords={encoded_keywords}"
+
+    return ""
+
+
 def normalize_text(value: Any) -> str:
     if value is None:
         return ""
@@ -629,11 +649,17 @@ def mock_job(
 ) -> dict[str, Any]:
     slug = slugify(f"{source}-{company}-{position}-{location}")
     source_slug = slugify(source)
+    external_search_link = build_external_search_link(
+        source=source,
+        company=company,
+        position=position,
+        location=location,
+    )
     return {
         "company": company,
         "position": position,
         "location": location,
-        "link": f"https://example.com/{source_slug}/{slug}",
+        "link": external_search_link or f"https://example.com/{source_slug}/{slug}",
         "source": source,
         "description": description,
         "level": level,
