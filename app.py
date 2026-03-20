@@ -608,31 +608,6 @@ def slugify(value: str) -> str:
     return slug or "job"
 
 
-SOURCE_SEARCH_HINTS: dict[str, str] = {
-    "Greenhouse": "site:boards.greenhouse.io",
-    "Lever": "site:jobs.lever.co",
-    "Ashby": "site:jobs.ashbyhq.com",
-    "RemoteOK": "site:remoteok.com",
-    "YCombinator": "site:workatastartup.com",
-    "Welcome to the Jungle": "site:welcometothejungle.com",
-    "Himalayas": "site:himalayas.app",
-    "We Work Remotely": "site:weworkremotely.com",
-    "Hacker News": 'site:news.ycombinator.com "Who is hiring"',
-    "Otta": "Otta jobs",
-    "Wellfound": "Wellfound jobs",
-    "Indeed": "Indeed jobs",
-    "Glassdoor": "Glassdoor jobs",
-    "Flexa": "Flexa careers",
-    "EuroTechJobs": "EuroTechJobs",
-    "Built In": "Built In jobs",
-    "JobTeaser": "JobTeaser jobs",
-    "Talent.com": "Talent.com jobs",
-    "StepStone": "StepStone jobs",
-    "Adzuna": "Adzuna jobs",
-    "Reed": "Reed jobs",
-}
-
-
 def build_google_search_link(query: str) -> str:
     return f"https://www.google.com/search?q={quote_plus(query)}"
 
@@ -643,25 +618,109 @@ def build_external_search_link(
     position: str,
     location: str,
 ) -> str:
-    search_terms = " ".join(part for part in [position, company] if part).strip()
-    encoded_keywords = quote_plus(search_terms or position or company or "jobs")
-    encoded_location = quote_plus(location or "")
+    """Return a direct search URL on the source platform.
+
+    Every branch targets the platform's own search endpoint so the user lands
+    on real results rather than a Google proxy.  Google is kept as an
+    explicit last-resort fallback for sources that do not expose a stable
+    query-string search interface.
+    """
+    kw = quote_plus(" ".join(p for p in [position, company] if p).strip() or "jobs")
+    loc = quote_plus(location or "")
+    pos = quote_plus(position or "")
+    com = quote_plus(company or "")
+
+    # ── Platforms with clean query-string search ──────────────────────────
 
     if source == "LinkedIn":
-        base_url = "https://www.linkedin.com/jobs/search/"
-        if encoded_location:
-            return f"{base_url}?keywords={encoded_keywords}&location={encoded_location}"
-        return f"{base_url}?keywords={encoded_keywords}"
+        base = "https://www.linkedin.com/jobs/search/"
+        return f"{base}?keywords={kw}&location={loc}" if loc else f"{base}?keywords={kw}"
 
     if source == "Indeed":
-        base_url = "https://www.indeed.com/jobs"
-        if encoded_location:
-            return f"{base_url}?q={encoded_keywords}&l={encoded_location}"
-        return f"{base_url}?q={encoded_keywords}"
+        base = "https://www.indeed.com/jobs"
+        return f"{base}?q={kw}&l={loc}" if loc else f"{base}?q={kw}"
 
-    hint = SOURCE_SEARCH_HINTS.get(source, source)
-    query_parts = [hint, position, company, location]
-    query = " ".join(part for part in query_parts if part)
+    if source == "Glassdoor":
+        # Glassdoor search accepts keyword + location as query params
+        base = "https://www.glassdoor.com/Job/jobs.htm"
+        return f"{base}?sc.keyword={kw}&locT=N&locName={loc}" if loc else f"{base}?sc.keyword={kw}"
+
+    if source == "Wellfound":
+        # Wellfound (ex-AngelList) role search
+        return f"https://wellfound.com/jobs?q={kw}&l={loc}" if loc else f"https://wellfound.com/jobs?q={kw}"
+
+    if source == "Otta":
+        return f"https://app.otta.com/jobs/search?search={kw}"
+
+    if source == "RemoteOK":
+        # RemoteOK uses /remote-<slug>-jobs URL pattern; fall back to tag search
+        tag = quote_plus(position.lower().replace(" ", "-")) if position else "jobs"
+        return f"https://remoteok.com/remote-{tag}-jobs"
+
+    if source == "We Work Remotely":
+        return f"https://weworkremotely.com/remote-jobs/search?term={kw}"
+
+    if source == "Himalayas":
+        return f"https://himalayas.app/jobs?q={kw}"
+
+    if source == "YCombinator":
+        return f"https://www.workatastartup.com/jobs?q={kw}"
+
+    if source == "Hacker News":
+        # HN Who's Hiring threads — direct to latest monthly thread search
+        return f"https://news.ycombinator.com/jobs"
+
+    if source == "Welcome to the Jungle":
+        return f"https://www.welcometothejungle.com/en/jobs?query={kw}&aroundQuery={loc}" if loc else f"https://www.welcometothejungle.com/en/jobs?query={kw}"
+
+    if source == "Flexa":
+        return f"https://flexa.careers/jobs?search={kw}"
+
+    if source == "EuroTechJobs":
+        return f"https://eurotechjobs.com/job_search/search?phrase={kw}"
+
+    if source == "Built In":
+        return f"https://builtin.com/jobs?search={kw}&loc={loc}" if loc else f"https://builtin.com/jobs?search={kw}"
+
+    if source == "JobTeaser":
+        return f"https://www.jobteaser.com/en/job-offers?q={kw}"
+
+    if source == "Talent.com":
+        return f"https://www.talent.com/jobs?k={kw}&l={loc}" if loc else f"https://www.talent.com/jobs?k={kw}"
+
+    if source == "StepStone":
+        return f"https://www.stepstone.de/jobs/{pos}?q={kw}&where={loc}" if loc else f"https://www.stepstone.de/jobs?q={kw}"
+
+    if source == "Adzuna":
+        # Adzuna UK as default; adjust country prefix for other markets
+        return f"https://www.adzuna.co.uk/search?q={kw}&w={loc}" if loc else f"https://www.adzuna.co.uk/search?q={kw}"
+
+    if source == "Reed":
+        return f"https://www.reed.co.uk/jobs/{pos}-jobs?keywords={kw}&locationName={loc}" if loc else f"https://www.reed.co.uk/jobs/{pos}-jobs"
+
+    # ── Greenhouse / Lever / Ashby: link to the company's own board ──────
+    # These ATSes host boards at a predictable URL; we point directly there
+    # and let the user search on the board itself.
+
+    if source == "Greenhouse" and company:
+        slug = re.sub(r"[^a-z0-9]+", "", company.lower())
+        return f"https://boards.greenhouse.io/{slug}"
+
+    if source == "Lever" and company:
+        slug = re.sub(r"[^a-z0-9]+", "-", company.lower()).strip("-")
+        return f"https://jobs.lever.co/{slug}"
+
+    if source == "Ashby" and company:
+        slug = re.sub(r"[^a-z0-9]+", "-", company.lower()).strip("-")
+        return f"https://jobs.ashbyhq.com/{slug}"
+
+    # ── Last-resort fallback: Google search scoped to the source domain ───
+    hint = {
+        "Greenhouse": "site:boards.greenhouse.io",
+        "Lever": "site:jobs.lever.co",
+        "Ashby": "site:jobs.ashbyhq.com",
+    }.get(source, source)
+    query = " ".join(p for p in [hint, position, company, location] if p)
     return build_google_search_link(query)
 
 
